@@ -2,14 +2,12 @@ import argparse
 import heapq
 import json
 import math
-import os
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import cv2
-import numpy as np
 import airsim
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -18,7 +16,7 @@ sys.path.insert(0, str(REPO_ROOT))
 from airsim_plugin.AirVLNSimulatorClientTool import AirVLNSimulatorClientTool
 
 
-GridCoord = Tuple[int, int]
+GridCoord3D = Tuple[int, int, int]
 WorldPoint3D = Tuple[float, float, float]
 
 
@@ -55,47 +53,115 @@ def load_episodes(gt_json_path: str) -> List[Episode]:
     return episodes
 
 
-def heuristic(a: GridCoord, b: GridCoord) -> float:
-    return math.hypot(a[0] - b[0], a[1] - b[1])
+def heuristic_3d(a: GridCoord3D, b: GridCoord3D) -> float:
+    return math.sqrt((a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2 + (a[2] - b[2]) ** 2)
 
 
-def neighbors_8(c: GridCoord) -> Iterable[Tuple[GridCoord, float]]:
-    x, y = c
-    steps = [
-        ((x + 1, y), 1.0),
-        ((x - 1, y), 1.0),
-        ((x, y + 1), 1.0),
-        ((x, y - 1), 1.0),
-        ((x + 1, y + 1), math.sqrt(2.0)),
-        ((x + 1, y - 1), math.sqrt(2.0)),
-        ((x - 1, y + 1), math.sqrt(2.0)),
-        ((x - 1, y - 1), math.sqrt(2.0)),
-    ]
-    return steps
+def neighbors_26(c: GridCoord3D) -> Iterable[Tuple[GridCoord3D, float]]:
+    x, y, z = c
+    for dx in (-1, 0, 1):
+        for dy in (-1, 0, 1):
+            for dz in (-1, 0, 1):
+                if dx == 0 and dy == 0 and dz == 0:
+                    continue
+                nxt = (x + dx, y + dy, z + dz)
+                move_cost = math.sqrt(dx * dx + dy * dy + dz * dz)
+                yield nxt, move_cost
 
 
-def astar(
-    start: GridCoord,
-    goal: GridCoord,
-    blocked: Optional[set],
-    x_min: int,
-    x_max: int,
-    y_min: int,
-    y_max: int,
-) -> List[GridCoord]:
-    if blocked is None:
-        blocked = set()
+def world_to_grid_3d(
+    x: float,
+    y: float,
+    z: float,
+    origin_xyz: Tuple[float, float, float],
+    xy_resolution: float,
+    z_resolution: float,
+) -> GridCoord3D:
+    ox, oy, oz = origin_xyz
+    gx = int(round((x - ox) / xy_resolution))
+    gy = int(round((y - oy) / xy_resolution))
+    gz = int(round((z - oz) / z_resolution))
+    return gx, gy, gz
 
-    open_heap: List[Tuple[float, GridCoord]] = [(0.0, start)]
-    came_from: Dict[GridCoord, GridCoord] = {}
-    g_cost: Dict[GridCoord, float] = {start: 0.0}
+
+def grid_to_world_3d(
+    gx: int,
+    gy: int,
+    gz: int,
+    origin_xyz: Tuple[float, float, float],
+    xy_resolution: float,
+    z_resolution: float,
+) -> WorldPoint3D:
+    ox, oy, oz = origin_xyz
+    x = ox + gx * xy_resolution
+    y = oy + gy * xy_resolution
+    z = oz + gz * z_resolution
+    return float(x), float(y), float(z)
+
+
+def yaw_from_points(curr: WorldPoint3D, nxt: Optional[WorldPoint3D]) -> float:
+    if nxt is None:
+        return 0.0
+    dx = nxt[0] - curr[0]
+    dy = nxt[1] - curr[1]
+    return math.atan2(dy, dx)
+
+
+def _probe_collision(sim_tool: AirVLNSimulatorClientTool, point: WorldPoint3D, yaw: float = 0.0) -> bool:
+    q = airsim.to_quaternion(0.0, 0.0, yaw)
+    pose = airsim.Pose(
+        position_val=airsim.Vector3r(point[0], point[1], point[2]),
+        orientation_val=airsim.Quaternionr(q.x_val, q.y_val, q.z_val, q.w_val),
+    )
+    ok = sim_tool.setPoses([[pose]])
+    if not ok:
+        return True
+
+    sensor_info = sim_tool.getSensorInfo()
+    if not sensor_info:
+        return True
+
+    has_collided = bool(sensor_info[0][0]["sensors"]["state"]["collision"]["has_collided"])
+    return has_collided
+
+
+def _edge_points(a: WorldPoint3D, b: WorldPoint3D, sample_step: float) -> List[WorldPoint3D]:
+    dist = math.sqrt((a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2 + (a[2] - b[2]) ** 2)
+    n = max(1, int(math.ceil(dist / max(sample_step, 1e-6))))
+    pts: List[WorldPoint3D] = []
+    for i in range(n + 1):
+        t = i / n
+        x = a[0] + t * (b[0] - a[0])
+        y = a[1] + t * (b[1] - a[1])
+        z = a[2] + t * (b[2] - a[2])
+        pts.append((float(x), float(y), float(z)))
+    return pts
+
+
+def astar_3d(
+    start: GridCoord3D,
+    goal: GridCoord3D,
+    in_bounds: Callable[[GridCoord3D], bool],
+    is_free: Callable[[GridCoord3D], bool],
+    edge_is_free: Callable[[GridCoord3D, GridCoord3D], bool],
+    max_expansions: int,
+) -> List[GridCoord3D]:
+    open_heap: List[Tuple[float, GridCoord3D]] = [(heuristic_3d(start, goal), start)]
+    came_from: Dict[GridCoord3D, GridCoord3D] = {}
+    g_cost: Dict[GridCoord3D, float] = {start: 0.0}
     visited = set()
+    expansions = 0
 
     while open_heap:
         _, curr = heapq.heappop(open_heap)
         if curr in visited:
             continue
+
         visited.add(curr)
+        expansions += 1
+
+        if expansions > max_expansions:
+            raise RuntimeError("A* exceeded max expansions. Increase bounds/resolution or max_expansions.")
 
         if curr == goal:
             path = [curr]
@@ -105,79 +171,103 @@ def astar(
             path.reverse()
             return path
 
-        for nxt, move_cost in neighbors_8(curr):
-            nx, ny = nxt
-            if nx < x_min or nx > x_max or ny < y_min or ny > y_max:
+        for nxt, move_cost in neighbors_26(curr):
+            if not in_bounds(nxt):
                 continue
-            if nxt in blocked:
+            if not is_free(nxt):
+                continue
+            if not edge_is_free(curr, nxt):
                 continue
 
             new_g = g_cost[curr] + move_cost
             if nxt not in g_cost or new_g < g_cost[nxt]:
                 g_cost[nxt] = new_g
-                f = new_g + heuristic(nxt, goal)
                 came_from[nxt] = curr
+                f = new_g + heuristic_3d(nxt, goal)
                 heapq.heappush(open_heap, (f, nxt))
 
-    raise RuntimeError("A* failed to find a path. Try larger --search_margin.")
+    raise RuntimeError("A* failed to find a collision-free 3D path.")
 
 
-def world_to_grid(x: float, y: float, origin_xy: Tuple[float, float], resolution: float) -> GridCoord:
-    ox, oy = origin_xy
-    gx = int(round((x - ox) / resolution))
-    gy = int(round((y - oy) / resolution))
-    return gx, gy
-
-
-def grid_to_world(gx: int, gy: int, origin_xy: Tuple[float, float], resolution: float) -> Tuple[float, float]:
-    ox, oy = origin_xy
-    x = ox + gx * resolution
-    y = oy + gy * resolution
-    return x, y
-
-
-def build_world_path(
+def build_world_path_3d(
+    sim_tool: AirVLNSimulatorClientTool,
     start: WorldPoint3D,
     goal: WorldPoint3D,
-    resolution: float,
-    search_margin: int,
-    keep_z_constant: bool,
+    xy_resolution: float,
+    z_resolution: float,
+    search_margin_xy: int,
+    search_margin_z: int,
+    max_expansions: int,
+    edge_check_step: float,
 ) -> List[WorldPoint3D]:
-    min_x = min(start[0], goal[0]) - search_margin * resolution
-    min_y = min(start[1], goal[1]) - search_margin * resolution
+    min_x = min(start[0], goal[0]) - search_margin_xy * xy_resolution
+    min_y = min(start[1], goal[1]) - search_margin_xy * xy_resolution
+    min_z = min(start[2], goal[2]) - search_margin_z * z_resolution
 
-    origin_xy = (min_x, min_y)
+    origin_xyz = (min_x, min_y, min_z)
 
-    s = world_to_grid(start[0], start[1], origin_xy, resolution)
-    g = world_to_grid(goal[0], goal[1], origin_xy, resolution)
+    s = world_to_grid_3d(start[0], start[1], start[2], origin_xyz, xy_resolution, z_resolution)
+    g = world_to_grid_3d(goal[0], goal[1], goal[2], origin_xyz, xy_resolution, z_resolution)
 
-    x_min = min(s[0], g[0]) - search_margin
-    x_max = max(s[0], g[0]) + search_margin
-    y_min = min(s[1], g[1]) - search_margin
-    y_max = max(s[1], g[1]) + search_margin
+    x_min = min(s[0], g[0]) - search_margin_xy
+    x_max = max(s[0], g[0]) + search_margin_xy
+    y_min = min(s[1], g[1]) - search_margin_xy
+    y_max = max(s[1], g[1]) + search_margin_xy
+    z_min = min(s[2], g[2]) - search_margin_z
+    z_max = max(s[2], g[2]) + search_margin_z
 
-    grid_path = astar(s, g, blocked=None, x_min=x_min, x_max=x_max, y_min=y_min, y_max=y_max)
+    def in_bounds(node: GridCoord3D) -> bool:
+        x, y, z = node
+        return x_min <= x <= x_max and y_min <= y <= y_max and z_min <= z <= z_max
 
-    world_path: List[WorldPoint3D] = []
-    total = max(1, len(grid_path) - 1)
-    for i, (gx, gy) in enumerate(grid_path):
-        x, y = grid_to_world(gx, gy, origin_xy, resolution)
-        if keep_z_constant:
-            z = float(start[2])
-        else:
-            alpha = i / total
-            z = float(start[2] + alpha * (goal[2] - start[2]))
-        world_path.append((float(x), float(y), float(z)))
+    free_cache: Dict[GridCoord3D, bool] = {}
+    edge_cache: Dict[Tuple[GridCoord3D, GridCoord3D], bool] = {}
 
+    def node_to_world(node: GridCoord3D) -> WorldPoint3D:
+        return grid_to_world_3d(node[0], node[1], node[2], origin_xyz, xy_resolution, z_resolution)
+
+    def is_free(node: GridCoord3D) -> bool:
+        if node in free_cache:
+            return free_cache[node]
+        point = node_to_world(node)
+        occupied = _probe_collision(sim_tool, point)
+        free_cache[node] = (not occupied)
+        return free_cache[node]
+
+    def edge_is_free(a: GridCoord3D, b: GridCoord3D) -> bool:
+        key = (a, b) if a <= b else (b, a)
+        if key in edge_cache:
+            return edge_cache[key]
+
+        pa = node_to_world(a)
+        pb = node_to_world(b)
+        pts = _edge_points(pa, pb, sample_step=edge_check_step)
+
+        ok = True
+        for p in pts:
+            if _probe_collision(sim_tool, p):
+                ok = False
+                break
+
+        edge_cache[key] = ok
+        return ok
+
+    if not is_free(s):
+        raise RuntimeError("Start position is in collision. Cannot run 3D A*.")
+    if not is_free(g):
+        raise RuntimeError("Goal position is in collision. Cannot run 3D A*.")
+
+    grid_path = astar_3d(
+        start=s,
+        goal=g,
+        in_bounds=in_bounds,
+        is_free=is_free,
+        edge_is_free=edge_is_free,
+        max_expansions=max_expansions,
+    )
+
+    world_path = [node_to_world(n) for n in grid_path]
     return world_path
-
-
-def yaw_from_points(curr: WorldPoint3D, nxt: Optional[WorldPoint3D]) -> float:
-    if nxt is None:
-        return 0.0
-    dx = nxt[0] - curr[0]
-    dy = nxt[1] - curr[1]
-    return math.atan2(dy, dx)
 
 
 def write_rgb_bytes(path: str, image_bytes: bytes) -> None:
@@ -273,14 +363,17 @@ def build_machine_info(simulator_port: int, map_name: str, gpu_id: int) -> List[
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Plan A* path and capture RGB/Depth images along the whole path.")
+    parser = argparse.ArgumentParser(description="Plan collision-free 3D A* path and capture RGB/Depth images.")
     parser.add_argument("--gt_json", type=str, required=True, help="Ground-truth json (single episode object or list).")
     parser.add_argument("--output_dir", type=str, default="./logs/astar_path_images", help="Output root directory.")
     parser.add_argument("--simulator_port", type=int, default=31000, help="AirVLNSimulatorServerTool socket port.")
     parser.add_argument("--gpu_id", type=int, default=0, help="GPU id passed to server when opening scene.")
-    parser.add_argument("--resolution", type=float, default=2.0, help="A* grid resolution in world units.")
-    parser.add_argument("--search_margin", type=int, default=20, help="Extra grid cells around start-goal bounding box.")
-    parser.add_argument("--keep_z_constant", action="store_true", help="Keep z fixed at start z across path.")
+    parser.add_argument("--xy_resolution", type=float, default=2.0, help="3D A* XY grid resolution.")
+    parser.add_argument("--z_resolution", type=float, default=1.0, help="3D A* Z grid resolution.")
+    parser.add_argument("--search_margin_xy", type=int, default=20, help="Extra XY grid cells around start-goal.")
+    parser.add_argument("--search_margin_z", type=int, default=6, help="Extra Z grid cells around start-goal.")
+    parser.add_argument("--edge_check_step", type=float, default=1.0, help="Collision probe step along edges.")
+    parser.add_argument("--max_expansions", type=int, default=30000, help="Maximum A* node expansions.")
     parser.add_argument("--cameras", type=str, default="0,1,2,3", help="Comma-separated AirSim camera names.")
     parser.add_argument("--max_episodes", type=int, default=0, help="If >0, only process first N episodes.")
     return parser.parse_args()
@@ -310,12 +403,16 @@ def main() -> None:
         try:
             for episode in eps:
                 print(f"[INFO] episode_id={episode.episode_id}, object={episode.object_name}")
-                world_path = build_world_path(
+                world_path = build_world_path_3d(
+                    sim_tool=sim_tool,
                     start=episode.start_position,
                     goal=episode.goal_position,
-                    resolution=args.resolution,
-                    search_margin=args.search_margin,
-                    keep_z_constant=args.keep_z_constant,
+                    xy_resolution=args.xy_resolution,
+                    z_resolution=args.z_resolution,
+                    search_margin_xy=args.search_margin_xy,
+                    search_margin_z=args.search_margin_z,
+                    max_expansions=args.max_expansions,
+                    edge_check_step=args.edge_check_step,
                 )
 
                 ep_dir = output_root / map_name / f"episode_{episode.episode_id}"

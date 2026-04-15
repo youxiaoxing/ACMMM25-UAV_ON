@@ -124,11 +124,19 @@ python scripts/astar_collect_images.py \
   --output_dir ./logs/astar_path_images \
   --simulator_port 31000 \
   --gpu_id 0 \
-  --resolution 2.0 \
-  --search_margin 20 \
-  --keep_z_constant \
+  --xy_resolution 2.0 \
+  --z_resolution 1.0 \
+  --search_margin_xy 20 \
+  --search_margin_z 6 \
+  --edge_check_step 1.0 \
+  --max_expansions 30000 \
   --cameras 0,1,2,3
 ```
+
+This script now uses **collision-aware 3D A***:
+- 26-neighbor 3D grid search (x, y, z).
+- Candidate nodes/edges are checked with AirSim collision feedback to avoid obstacles.
+- Requires the simulator scene to be running and reachable.
 
 Output structure:
 
