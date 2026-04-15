@@ -114,6 +114,53 @@ Watch a full successful flight of our Aerial ObjectNav Agent in action:
   pip install msgpack-rpc-python
   ```
 
+## A* Path Image Collection (from GT JSON)
+
+If you already have ground-truth episode JSON (same format as UAV-ON dataset), you can generate an A* path from start pose to target pose and capture RGB/Depth images along the whole path.
+
+```bash
+python scripts/astar_collect_images.py \
+  --gt_json /path/to/gt.json \
+  --output_dir ./logs/astar_path_images \
+  --simulator_port 31000 \
+  --gpu_id 0 \
+  --horizontal_step 5.0 \
+  --vertical_step 2.0 \
+  --yaw_step_deg 15.0 \
+  --state_xy_resolution 1.0 \
+  --state_z_resolution 1.0 \
+  --search_margin_xy_m 60.0 \
+  --search_margin_z_m 20.0 \
+  --edge_check_step 1.0 \
+  --max_expansions 50000 \
+  --goal_tolerance_xy 5.0 \
+  --goal_tolerance_z 2.0 \
+  --cameras 0,1,2,3
+```
+
+This script now uses **action-space-consistent A***:
+- State includes `(x, y, z, yaw)` and actions are restricted to:
+  `forward`, `left`, `right`, `ascend`, `descend`, `rotl`, `rotr`.
+- Candidate nodes/edges are checked with AirSim collision feedback to avoid obstacles.
+- `path_meta.json` includes planned action sequence so it can be used for imitation/trajectory supervision.
+- If one episode fails (e.g., start in collision), the script will skip it and continue; skipped items are recorded in `<map_name>/skipped_episodes.jsonl`.
+- Requires the simulator scene to be running and reachable.
+
+Output structure:
+
+```text
+logs/astar_path_images/
+└── <map_name>/
+    └── episode_<episode_id>/
+        ├── path_meta.json
+        ├── step_0000/
+        │   ├── cam_0_rgb.png
+        │   ├── cam_0_depth.png
+        │   └── ...
+        └── step_0001/
+            └── ...
+```
+
 
 
 
