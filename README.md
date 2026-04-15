@@ -114,6 +114,37 @@ Watch a full successful flight of our Aerial ObjectNav Agent in action:
   pip install msgpack-rpc-python
   ```
 
+## A* Path Image Collection (from GT JSON)
+
+If you already have ground-truth episode JSON (same format as UAV-ON dataset), you can generate an A* path from start pose to target pose and capture RGB/Depth images along the whole path.
+
+```bash
+python scripts/astar_collect_images.py \
+  --gt_json /path/to/gt.json \
+  --output_dir ./logs/astar_path_images \
+  --simulator_port 31000 \
+  --gpu_id 0 \
+  --resolution 2.0 \
+  --search_margin 20 \
+  --keep_z_constant \
+  --cameras 0,1,2,3
+```
+
+Output structure:
+
+```text
+logs/astar_path_images/
+└── <map_name>/
+    └── episode_<episode_id>/
+        ├── path_meta.json
+        ├── step_0000/
+        │   ├── cam_0_rgb.png
+        │   ├── cam_0_depth.png
+        │   └── ...
+        └── step_0001/
+            └── ...
+```
+
 
 
 
