@@ -124,18 +124,25 @@ python scripts/astar_collect_images.py \
   --output_dir ./logs/astar_path_images \
   --simulator_port 31000 \
   --gpu_id 0 \
-  --xy_resolution 2.0 \
-  --z_resolution 1.0 \
-  --search_margin_xy 20 \
-  --search_margin_z 6 \
+  --horizontal_step 5.0 \
+  --vertical_step 2.0 \
+  --yaw_step_deg 15.0 \
+  --state_xy_resolution 1.0 \
+  --state_z_resolution 1.0 \
+  --search_margin_xy_m 60.0 \
+  --search_margin_z_m 20.0 \
   --edge_check_step 1.0 \
-  --max_expansions 30000 \
+  --max_expansions 50000 \
+  --goal_tolerance_xy 5.0 \
+  --goal_tolerance_z 2.0 \
   --cameras 0,1,2,3
 ```
 
-This script now uses **collision-aware 3D A***:
-- 26-neighbor 3D grid search (x, y, z).
+This script now uses **action-space-consistent A***:
+- State includes `(x, y, z, yaw)` and actions are restricted to:
+  `forward`, `left`, `right`, `ascend`, `descend`, `rotl`, `rotr`.
 - Candidate nodes/edges are checked with AirSim collision feedback to avoid obstacles.
+- `path_meta.json` includes planned action sequence so it can be used for imitation/trajectory supervision.
 - Requires the simulator scene to be running and reachable.
 
 Output structure:
