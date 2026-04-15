@@ -3,6 +3,7 @@ import heapq
 import json
 import math
 import sys
+import traceback
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
@@ -467,27 +468,50 @@ def main() -> None:
         sim_tool = AirVLNSimulatorClientTool(machines_info=machines_info)
         print(f"[INFO] Opening scene: {map_name}")
         sim_tool.run_call()
+        skipped_records = []
 
         try:
             for episode in eps:
-                print(f"[INFO] episode_id={episode.episode_id}, object={episode.object_name}")
-                states, actions = plan_action_consistent_astar(sim_tool=sim_tool, episode=episode, cfg=cfg)
+                try:
+                    print(f"[INFO] episode_id={episode.episode_id}, object={episode.object_name}")
+                    states, actions = plan_action_consistent_astar(sim_tool=sim_tool, episode=episode, cfg=cfg)
 
-                ep_dir = output_root / map_name / f"episode_{episode.episode_id}"
-                capture_episode_path_images(
-                    sim_tool=sim_tool,
-                    episode=episode,
-                    states=states,
-                    actions=actions,
-                    cfg=cfg,
-                    output_dir=ep_dir,
-                    cameras=cameras,
-                )
+                    ep_dir = output_root / map_name / f"episode_{episode.episode_id}"
+                    capture_episode_path_images(
+                        sim_tool=sim_tool,
+                        episode=episode,
+                        states=states,
+                        actions=actions,
+                        cfg=cfg,
+                        output_dir=ep_dir,
+                        cameras=cameras,
+                    )
 
-                print(f"[INFO] Saved {len(states)} states / {len(actions)} actions to: {ep_dir}")
+                    print(f"[INFO] Saved {len(states)} states / {len(actions)} actions to: {ep_dir}")
+                except Exception as e:
+                    msg = f"[WARN] Skip episode_id={episode.episode_id} because: {e}"
+                    print(msg)
+                    skipped_records.append(
+                        {
+                            "episode_id": episode.episode_id,
+                            "map_name": episode.map_name,
+                            "object_name": episode.object_name,
+                            "error": str(e),
+                            "traceback": traceback.format_exc(),
+                        }
+                    )
+                    continue
         finally:
             print(f"[INFO] Closing scene: {map_name}")
             sim_tool.closeScenes()
+            if len(skipped_records) > 0:
+                map_dir = output_root / map_name
+                map_dir.mkdir(parents=True, exist_ok=True)
+                skip_path = map_dir / "skipped_episodes.jsonl"
+                with open(skip_path, "w", encoding="utf-8") as f:
+                    for row in skipped_records:
+                        f.write(json.dumps(row, ensure_ascii=False) + "\n")
+                print(f"[INFO] Wrote skipped episode report to: {skip_path}")
 
 
 if __name__ == "__main__":

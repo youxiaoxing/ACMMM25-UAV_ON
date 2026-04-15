@@ -143,6 +143,7 @@ This script now uses **action-space-consistent A***:
   `forward`, `left`, `right`, `ascend`, `descend`, `rotl`, `rotr`.
 - Candidate nodes/edges are checked with AirSim collision feedback to avoid obstacles.
 - `path_meta.json` includes planned action sequence so it can be used for imitation/trajectory supervision.
+- If one episode fails (e.g., start in collision), the script will skip it and continue; skipped items are recorded in `<map_name>/skipped_episodes.jsonl`.
 - Requires the simulator scene to be running and reachable.
 
 Output structure:
